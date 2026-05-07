@@ -45,8 +45,22 @@ publishes the lift37 GTF natively).
 
 ## Reproduction
 
+The full pipeline (downloads + filtering + both builds) is wrapped in a Snakefile:
+
 ```
-scripts/build_exon_map.py \
+snakemake -j 4 all
+```
+
+That fetches MANE, GENCODE GRCh38 + GRCh37-lift, and UniProt into `data/`, filters
+the UniProt idmapping down to Ensembl_TRS rows, and emits both TSVs. To pin
+different upstream releases, edit `MANE_VERSION` / `GENCODE_VERSION` at the top
+of the `Snakefile` (verify against the FTP listings first — Snakemake won't
+auto-discover newer releases).
+
+To run a single build without Snakemake:
+
+```
+python3 scripts/build_exon_map.py \
   --gtf data/gencode.v49.primary_assembly.annotation.gtf.gz \
   --mane data/MANE.GRCh38.v1.5.summary.txt.gz \
   --fasta data/UP000005640_9606.fasta.gz \

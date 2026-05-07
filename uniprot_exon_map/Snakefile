@@ -1,0 +1,124 @@
+# Reproducible build of per-exon UniProt mapping tables (GRCh37 + GRCh38).
+#
+# Run:
+#   snakemake -j 4 all
+#
+# To pin to different upstream releases, edit the constants below. They are
+# not auto-discovered — check the FTP listings before bumping:
+#   https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/current/
+#   https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/
+
+MANE_VERSION = "1.5"
+GENCODE_VERSION = "49"
+UNIPROT_PROTEOME = "UP000005640"   # Homo sapiens reference proteome
+UNIPROT_TAXID = "9606"
+
+DATA = "data"
+
+MANE_URL = (
+    f"https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/current/"
+    f"MANE.GRCh38.v{MANE_VERSION}.summary.txt.gz"
+)
+GENCODE_BASE = (
+    f"https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{GENCODE_VERSION}"
+)
+GENCODE_GRCH38_URL = f"{GENCODE_BASE}/gencode.v{GENCODE_VERSION}.primary_assembly.annotation.gtf.gz"
+GENCODE_GRCH37_URL = f"{GENCODE_BASE}/GRCh37_mapping/gencode.v{GENCODE_VERSION}lift37.annotation.gtf.gz"
+UNIPROT_FASTA_URL = (
+    f"https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/"
+    f"reference_proteomes/Eukaryota/{UNIPROT_PROTEOME}/{UNIPROT_PROTEOME}_{UNIPROT_TAXID}.fasta.gz"
+)
+UNIPROT_IDMAP_URL = (
+    f"https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/"
+    f"idmapping/by_organism/HUMAN_{UNIPROT_TAXID}_idmapping.dat.gz"
+)
+
+
+rule all:
+    input:
+        "mane_exons_grch38.tsv",
+        "mane_exons_grch37.tsv",
+
+
+rule download_mane:
+    output:
+        f"{DATA}/MANE.GRCh38.v{MANE_VERSION}.summary.txt.gz",
+    params:
+        url=MANE_URL,
+    shell:
+        "curl -sSL -o {output} '{params.url}'"
+
+
+rule download_gencode_grch38:
+    output:
+        f"{DATA}/gencode.v{GENCODE_VERSION}.primary_assembly.annotation.gtf.gz",
+    params:
+        url=GENCODE_GRCH38_URL,
+    shell:
+        "curl -sSL -o {output} '{params.url}'"
+
+
+rule download_gencode_grch37:
+    output:
+        f"{DATA}/gencode.v{GENCODE_VERSION}lift37.annotation.gtf.gz",
+    params:
+        url=GENCODE_GRCH37_URL,
+    shell:
+        "curl -sSL -o {output} '{params.url}'"
+
+
+rule download_uniprot_fasta:
+    output:
+        f"{DATA}/{UNIPROT_PROTEOME}_{UNIPROT_TAXID}.fasta.gz",
+    params:
+        url=UNIPROT_FASTA_URL,
+    shell:
+        "curl -sSL -o {output} '{params.url}'"
+
+
+# UniProt's full per-organism idmapping is ~200 MB and dominated by rows we
+# don't need. Stream it through awk to keep only Ensembl_TRS lines (~1 MB out).
+rule download_uniprot_xref:
+    output:
+        f"{DATA}/uniprot_ensembl_trs.tsv.gz",
+    params:
+        url=UNIPROT_IDMAP_URL,
+    shell:
+        r"""
+        curl -sSL '{params.url}' \
+          | zcat \
+          | awk -F'\t' '$2=="Ensembl_TRS"' \
+          | gzip > {output}
+        """
+
+
+rule build_grch38:
+    input:
+        gtf=f"{DATA}/gencode.v{GENCODE_VERSION}.primary_assembly.annotation.gtf.gz",
+        mane=f"{DATA}/MANE.GRCh38.v{MANE_VERSION}.summary.txt.gz",
+        fasta=f"{DATA}/{UNIPROT_PROTEOME}_{UNIPROT_TAXID}.fasta.gz",
+        xref=f"{DATA}/uniprot_ensembl_trs.tsv.gz",
+        script="scripts/build_exon_map.py",
+    output:
+        "mane_exons_grch38.tsv",
+    shell:
+        "python3 {input.script} "
+        "--gtf {input.gtf} --mane {input.mane} "
+        "--fasta {input.fasta} --xref {input.xref} "
+        "--out {output}"
+
+
+rule build_grch37:
+    input:
+        gtf=f"{DATA}/gencode.v{GENCODE_VERSION}lift37.annotation.gtf.gz",
+        mane=f"{DATA}/MANE.GRCh38.v{MANE_VERSION}.summary.txt.gz",
+        fasta=f"{DATA}/{UNIPROT_PROTEOME}_{UNIPROT_TAXID}.fasta.gz",
+        xref=f"{DATA}/uniprot_ensembl_trs.tsv.gz",
+        script="scripts/build_exon_map.py",
+    output:
+        "mane_exons_grch37.tsv",
+    shell:
+        "python3 {input.script} "
+        "--gtf {input.gtf} --mane {input.mane} "
+        "--fasta {input.fasta} --xref {input.xref} "
+        "--out {output}"
