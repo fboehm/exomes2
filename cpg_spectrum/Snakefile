@@ -1,0 +1,113 @@
+# CpG mutation spectrum from gnomAD v4.1 sites VCFs.
+#
+# Run (after editing the config constants below):
+#   snakemake -j 8 all
+#
+# Unlike ../uniprot_exon_map, the heavy inputs are NOT downloaded here: point
+# REF and VCF_TEMPLATE at files you already have. Requirements:
+#   - bcftools >= 1.16 with the +split-vep plugin
+#   - REF: uncompressed, samtools-faidx'd FASTA; contigs chr-prefixed to match the VCFs
+#   - the gnomAD VCFs must carry the `vep` INFO field (release sites VCFs do)
+#
+# Verify the CSQ subfield names once:  bcftools +split-vep -l <one.vcf.bgz>
+
+# --- config ----------------------------------------------------------------
+
+REF = "/path/to/GRCh38.fa"
+VCF_TEMPLATE = "/path/to/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz"
+EXON_MAP = "../uniprot_exon_map/mane_exons_grch38.tsv"
+
+CHROMS = [f"chr{c}" for c in list(range(1, 23)) + ["X", "Y"]]
+
+SPLIT_VEP_FMT = (
+    r"%CHROM\t%POS\t%REF\t%ALT\t%INFO/AC\t%Gene\t%SYMBOL\t%Feature"
+    r"\t%BIOTYPE\t%Consequence\t%CANONICAL\t%MANE_SELECT\t%Codons\n"
+)
+
+# The .fai reader in cpg_spectrum.py seeks by byte offset, which only works on a
+# plain (uncompressed) FASTA. A bgzipped reference would faidx fine but silently
+# misbehave at read time, so reject it up front.
+if REF.endswith((".gz", ".bgz", ".bz2")):
+    raise ValueError(
+        f"REF must be an uncompressed FASTA (cpg_spectrum.py cannot seek into "
+        f"compressed files); got {REF!r}. Decompress first, e.g. `bgzip -d {REF}`."
+    )
+
+
+# --- targets ---------------------------------------------------------------
+
+rule all:
+    input:
+        "variant_level.tsv",
+        "gene_level.refined.tsv",
+
+
+# One row per variant allele (incl. intergenic) + one row per (variant x anchor
+# gene). bcftools does PASS/SNV/CG filtering and CSQ expansion; the script adds
+# CpG context, substitution type, and the per-variant codon classification.
+# Build the .fai index the plain-Python reader needs (no-op if up to date).
+rule faidx:
+    input:
+        REF,
+    output:
+        REF + ".fai",
+    shell:
+        "samtools faidx {input}"
+
+
+rule classify_chrom:
+    input:
+        vcf=VCF_TEMPLATE,
+        ref=REF,
+        fai=REF + ".fai",
+        script="scripts/cpg_spectrum.py",
+    output:
+        variant=temp("variant_level/{chrom}.tsv"),
+        gene=temp("gene_level/{chrom}.tsv"),
+    shell:
+        r"""
+        bcftools norm -m- -f {input.ref} {input.vcf} \
+        | bcftools view -f PASS -v snps -i 'REF="C" || REF="G"' \
+        | bcftools +split-vep -a vep -d -f '{SPLIT_VEP_FMT}' \
+        | python3 {input.script} \
+            --fasta {input.ref} \
+            --variant-out {output.variant} \
+            --gene-out {output.gene}
+        """
+
+
+def _merge(inputs, output):
+    # concatenate per-chrom TSVs, keeping a single header
+    shell("awk 'FNR==1 && NR!=1 {{next}} 1' " + " ".join(inputs) + " > " + output)
+
+
+rule merge_variant:
+    input:
+        expand("variant_level/{chrom}.tsv", chrom=CHROMS),
+    output:
+        "variant_level.tsv",
+    run:
+        _merge(input, output[0])
+
+
+rule merge_gene:
+    input:
+        expand("gene_level/{chrom}.tsv", chrom=CHROMS),
+    output:
+        "gene_level.tsv",
+    run:
+        _merge(input, output[0])
+
+
+# Reclassify coding CpGs whose partner base is intronic (CpG straddles an
+# exon/intron junction) from split/single_codon to exon_boundary.
+rule refine_exon_boundary:
+    input:
+        gene="gene_level.tsv",
+        exon_map=EXON_MAP,
+        script="scripts/refine_exon_boundary.py",
+    output:
+        "gene_level.refined.tsv",
+    shell:
+        "python3 {input.script} "
+        "--gene-tsv {input.gene} --exon-map {input.exon_map} --out {output}"
