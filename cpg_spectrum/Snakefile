@@ -13,8 +13,8 @@
 
 # --- config ----------------------------------------------------------------
 
-REF = "/path/to/GRCh38.fa"
-VCF_TEMPLATE = "/path/to/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz"
+REF = "/scratch/jacks.local/frederick.boehm/exomes/data/Homo_sapiens_assembly38.fasta"
+VCF_TEMPLATE = "/scratch/jacks.local/frederick.boehm/exomes/data/gnomad/exomes/v4.1/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz"
 EXON_MAP = "../uniprot_exon_map/mane_exons_grch38.tsv"
 
 CHROMS = [f"chr{c}" for c in list(range(1, 23)) + ["X", "Y"]]
@@ -51,6 +51,8 @@ rule faidx:
         REF,
     output:
         REF + ".fai",
+    conda:
+        "envs/cpg.yaml"
     shell:
         "samtools faidx {input}"
 
@@ -64,6 +66,8 @@ rule classify_chrom:
     output:
         variant=temp("variant_level/{chrom}.tsv"),
         gene=temp("gene_level/{chrom}.tsv"),
+    conda:
+        "envs/cpg.yaml"
     shell:
         r"""
         bcftools norm -m- -f {input.ref} {input.vcf} \
@@ -108,6 +112,8 @@ rule refine_exon_boundary:
         script="scripts/refine_exon_boundary.py",
     output:
         "gene_level.refined.tsv",
+    conda:
+        "envs/cpg.yaml"
     shell:
         "python3 {input.script} "
         "--gene-tsv {input.gene} --exon-map {input.exon_map} --out {output}"

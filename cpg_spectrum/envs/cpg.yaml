@@ -1,0 +1,11 @@
+# Conda env for the cpg_spectrum rules.
+#   - bcftools: norm/view + the +split-vep plugin (bioconda ships the plugins)
+#   - samtools: faidx
+#   - python:   runs scripts/*.py, which are pure stdlib (no pysam/numpy/pandas)
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bcftools >=1.19
+  - samtools >=1.19
+  - python >=3.9

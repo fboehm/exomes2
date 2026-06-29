@@ -1,0 +1,46 @@
+# Snakemake >= 8 SLURM profile for the cpg_spectrum pipeline.
+#
+# Run from the cpg_spectrum dir:
+#   snakemake --workflow-profile profiles/slurm all
+#
+# Requires the SLURM executor plugin on the *submit* host:
+#   pip install snakemake-executor-plugin-slurm
+#
+# NOTE: SLURM jobs inherit the submitting shell's environment (sbatch
+# --export=ALL is the default), so make sure bcftools/samtools/python3 are on
+# PATH *before* you launch snakemake, e.g. `module load bcftools samtools` or
+# `conda activate <env>`. The executor does not load modules for you.
+
+executor: slurm
+jobs: 24                       # max SLURM jobs in flight (one per chromosome)
+
+# Per-rule conda envs (envs/cpg.yaml). Pre-build them on the login node with
+# `--conda-create-envs-only` BEFORE submitting — compute nodes usually have no
+# internet, so the env must already exist when a job activates it.
+software-deployment-method:
+  - conda
+# conda-frontend: mamba       # uncomment if mamba is installed (much faster solves)
+# Build envs once in a shared, persistent location instead of per-workdir .snakemake,
+# so they survive `--delete-all-output` and are reused across runs:
+# conda-prefix: "/scratch/jacks.local/frederick.boehm/snakemake-conda-envs"
+
+default-resources:
+  slurm_partition: "compute"
+  # slurm_account: "REPLACE_ME_ACCOUNT"     # <-- uncomment if your cluster requires -A/--account
+  mem_mb: 4000
+  runtime: 60                  # minutes
+  cpus_per_task: 1
+
+# classify_chrom is the heavy rule (bcftools norm | view | split-vep | python).
+# chr1 is the slowest because split-vep -d expands one row per transcript.
+set-resources:
+  classify_chrom:
+    mem_mb: 8000
+    runtime: 360               # 6 h ceiling; tune down once you see real timings
+    cpus_per_task: 2
+
+restart-times: 1               # auto-resubmit a job once if it dies (e.g. preemption)
+max-jobs-per-second: 5
+latency-wait: 60               # wait for NFS to flush output files before failing
+rerun-incomplete: true
+printshellcmds: true
