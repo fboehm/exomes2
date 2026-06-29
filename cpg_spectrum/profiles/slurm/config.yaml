@@ -19,7 +19,8 @@ jobs: 24                       # max SLURM jobs in flight (one per chromosome)
 # internet, so the env must already exist when a job activates it.
 software-deployment-method:
   - conda
-# conda-frontend: mamba       # uncomment if mamba is installed (much faster solves)
+conda-frontend: conda         # mamba isn't installed here; use plain conda
+
 # Build envs once in a shared, persistent location instead of per-workdir .snakemake,
 # so they survive `--delete-all-output` and are reused across runs:
 # conda-prefix: "/scratch/jacks.local/frederick.boehm/snakemake-conda-envs"
