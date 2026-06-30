@@ -40,6 +40,7 @@ rule all:
     input:
         "variant_level.tsv",
         "gene_level.refined.tsv",
+        "summary/spectrum.png",
 
 
 # One row per variant allele (incl. intergenic) + one row per (variant x anchor
@@ -117,3 +118,22 @@ rule refine_exon_boundary:
     shell:
         "python3 {input.script} "
         "--gene-tsv {input.gene} --exon-map {input.exon_map} --out {output}"
+
+
+# Tidyverse summaries + spectrum plot. The R script reads its paths from the
+# Snakemake `script:` object, so don't list scripts/summarize.R in `input`
+# (Snakemake re-runs this rule automatically when the script changes).
+rule summarize:
+    input:
+        variant="variant_level.tsv",
+        gene="gene_level.refined.tsv",
+    output:
+        spectrum="summary/spectrum_by_context.tsv",
+        singletons="summary/spectrum_singletons.tsv",
+        consequence="summary/spectrum_by_consequence.tsv",
+        codon="summary/codon_class.tsv",
+        plot="summary/spectrum.png",
+    conda:
+        "envs/summarize.yaml"
+    script:
+        "scripts/summarize.R"

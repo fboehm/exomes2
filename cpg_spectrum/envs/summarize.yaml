@@ -1,0 +1,8 @@
+# Conda env for scripts/summarize.R (the `summarize` rule).
+# r-tidyverse pulls dplyr/readr/tidyr/ggplot2 from conda-forge.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base >=4.2
+  - r-tidyverse
