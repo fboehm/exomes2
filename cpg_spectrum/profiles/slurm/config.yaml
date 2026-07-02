@@ -39,8 +39,8 @@ set-resources:
     mem_mb: 8000
     runtime: 360               # 6 h ceiling; tune down once you see real timings
     cpus_per_task: 2
-  summarize:                   # reads the whole merged TSVs into R
-    mem_mb: 16000
+  summarize:                   # chunked reads (read_tsv_chunked) keep this bounded
+    mem_mb: 8000
     runtime: 60
 
 restart-times: 1               # auto-resubmit a job once if it dies (e.g. preemption)
