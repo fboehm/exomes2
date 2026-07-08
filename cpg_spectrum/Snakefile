@@ -1,35 +1,55 @@
-# CpG mutation spectrum from gnomAD v4.1 sites VCFs.
+# CpG mutation spectrum from population exome sites VCFs.
 #
-# Run (after editing the config constants below):
-#   snakemake -j 8 all
+# One pipeline, two sources (see config.yaml):
+#   - gnomad : v4.1 release sites VCFs, already VEP-annotated + chr-prefixed.
+#   - rgc    : RGC Million Exomes frequency VCFs, unannotated + Ensembl-named
+#              contigs (1..Y), so we rename to chr* and run Ensembl VEP here.
 #
-# Unlike ../uniprot_exon_map, the heavy inputs are NOT downloaded here: point
-# REF and VCF_TEMPLATE at files you already have. Requirements:
-#   - bcftools >= 1.16 with the +split-vep plugin
-#   - REF: uncompressed, samtools-faidx'd FASTA; contigs chr-prefixed to match the VCFs
-#   - the gnomAD VCFs must carry the `vep` INFO field (release sites VCFs do)
+# Everything downstream of the +split-vep TSV (cpg_spectrum.py,
+# refine_exon_boundary.py, summarize.R, the exon map) is source-agnostic.
 #
-# Verify the CSQ subfield names once:  bcftools +split-vep -l <one.vcf.bgz>
+# Run (gnomad needs no VEP; rgc does):
+#   snakemake -j8 --config source=gnomad all
+#   snakemake -j8 --use-envmodules --config source=rgc all
+#
+# Requirements: bcftools >=1.19 with +split-vep; a samtools-faidx'd, UNCOMPRESSED,
+# chr-prefixed reference; for rgc, Ensembl VEP + a GRCh38 offline cache (README).
 
-# --- config ----------------------------------------------------------------
+configfile: "config.yaml"
 
-REF = "/scratch/jacks.local/frederick.boehm/exomes/data/Homo_sapiens_assembly38.fasta"
-VCF_TEMPLATE = "/scratch/jacks.local/frederick.boehm/exomes/data/gnomad/exomes/v4.1/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz"
-EXON_MAP = "../uniprot_exon_map/mane_exons_grch38.tsv"
+# --- resolve the active source --------------------------------------------
+
+SOURCE = config["source"]
+if SOURCE not in config["sources"]:
+    raise ValueError(f"source {SOURCE!r} not in config['sources']")
+S = config["sources"][SOURCE]
+
+REF = config["ref"]
+EXON_MAP = config["exon_map"]
+VCF_TEMPLATE = S["vcf_template"]
+AC_FIELD = S["ac_field"]
+CSQ_TAG = S["csq_tag"]
+CHRMAP = "data/ens2ucsc_chrs.txt"
 
 CHROMS = [f"chr{c}" for c in list(range(1, 23)) + ["X", "Y"]]
 
+# bcftools +split-vep output: 13 cols in the exact order cpg_spectrum.py expects.
 SPLIT_VEP_FMT = (
-    r"%CHROM\t%POS\t%REF\t%ALT\t%INFO/AC\t%Gene\t%SYMBOL\t%Feature"
-    r"\t%BIOTYPE\t%Consequence\t%CANONICAL\t%MANE_SELECT\t%Codons\n"
+    r"%CHROM\t%POS\t%REF\t%ALT\t%INFO/" + AC_FIELD +
+    r"\t%Gene\t%SYMBOL\t%Feature\t%BIOTYPE\t%Consequence"
+    r"\t%CANONICAL\t%MANE_SELECT\t%Codons\n"
 )
 
+# bcftools -i include expression: biallelic C/G SNVs, plus any source extra.
+INCLUDE = 'REF="C" || REF="G"'
+if S.get("include_extra"):
+    INCLUDE = f'({INCLUDE}) && ({S["include_extra"]})'
+
 # The .fai reader in cpg_spectrum.py seeks by byte offset, which only works on a
-# plain (uncompressed) FASTA. A bgzipped reference would faidx fine but silently
-# misbehave at read time, so reject it up front.
+# plain (uncompressed) FASTA. Reject a compressed reference up front.
 if REF.endswith((".gz", ".bgz", ".bz2")):
     raise ValueError(
-        f"REF must be an uncompressed FASTA (cpg_spectrum.py cannot seek into "
+        f"ref must be an uncompressed FASTA (cpg_spectrum.py cannot seek into "
         f"compressed files); got {REF!r}. Decompress first, e.g. `bgzip -d {REF}`."
     )
 
@@ -43,10 +63,7 @@ rule all:
         "summary/spectrum.png",
 
 
-# One row per variant allele (incl. intergenic) + one row per (variant x anchor
-# gene). bcftools does PASS/SNV/CG filtering and CSQ expansion; the script adds
-# CpG context, substitution type, and the per-variant codon classification.
-# Build the .fai index the plain-Python reader needs (no-op if up to date).
+# Build the .fai index the plain-Python FASTA reader needs (no-op if current).
 rule faidx:
     input:
         REF,
@@ -58,9 +75,80 @@ rule faidx:
         "samtools faidx {input}"
 
 
-rule classify_chrom:
+# Normalize to the analysis-ready record set: (optionally) rename contigs to
+# chr*, split multiallelics, then keep PASS biallelic C/G SNVs (+ any source
+# extra filter). Restricting here keeps the downstream VEP input minimal. For
+# gnomad this preserves the existing `vep` INFO field; for rgc the output is
+# unannotated and feeds the VEP rule.
+rule prep_chrom:
     input:
         vcf=VCF_TEMPLATE,
+        ref=REF,
+        fai=REF + ".fai",
+        chrmap=(CHRMAP if S["rename_chrs"] else []),
+    output:
+        temp("prepped/{chrom}.vcf.gz"),
+    params:
+        rename=(f"bcftools annotate --rename-chrs {CHRMAP} | " if S["rename_chrs"] else ""),
+    conda:
+        "envs/cpg.yaml"
+    shell:
+        r"""
+        bcftools view {input.vcf} \
+        | {params.rename}bcftools norm -m- -f {input.ref} \
+        | bcftools view -f PASS -v snps -i '{INCLUDE}' \
+        | bgzip > {output}
+        """
+
+
+# Annotate with Ensembl VEP (rgc only). --fields emits exactly the CSQ subfields
+# cpg_spectrum.py parses; --synonyms lets the Ensembl cache resolve chr* names.
+# Prefer the cluster module (--use-envmodules); envs/vep.yaml is a conda fallback.
+if S["annotate"]:
+
+    rule vep_chrom:
+        input:
+            vcf="prepped/{chrom}.vcf.gz",
+            ref=REF,
+        output:
+            temp("annotated/{chrom}.vcf"),
+        threads: config["vep"]["fork"]
+        params:
+            cache=config["vep"]["cache_dir"],
+            release=config["vep"]["release"],
+            synonyms=lambda wc: (
+                f'{config["vep"]["cache_dir"]}/homo_sapiens/'
+                f'{config["vep"]["release"]}_GRCh38/chr_synonyms.txt'
+            ),
+        conda:
+            "envs/vep.yaml"
+        envmodules:
+            config["vep"]["module"],
+        shell:
+            r"""
+            vep --offline --cache --dir_cache {params.cache} \
+                --cache_version {params.release} --species homo_sapiens --assembly GRCh38 \
+                --fasta {input.ref} --format vcf --vcf --no_stats --force_overwrite \
+                --fork {threads} --buffer_size 20000 \
+                --symbol --canonical --mane --biotype \
+                --fields "Gene,SYMBOL,Feature,BIOTYPE,Consequence,CANONICAL,MANE_SELECT,Codons" \
+                --synonyms {params.synonyms} \
+                -i {input.vcf} -o STDOUT > {output}
+            """
+
+
+def classify_input(wildcards):
+    """Annotated VCF if we ran VEP, else the prepped VCF (already carries CSQ)."""
+    if S["annotate"]:
+        return f"annotated/{wildcards.chrom}.vcf"
+    return f"prepped/{wildcards.chrom}.vcf.gz"
+
+
+# +split-vep expands per-transcript consequences; cpg_spectrum.py re-groups per
+# variant, adds CpG context / substitution type, and classifies coding CpGs.
+rule classify_chrom:
+    input:
+        vcf=classify_input,
         ref=REF,
         fai=REF + ".fai",
         script="scripts/cpg_spectrum.py",
@@ -71,9 +159,7 @@ rule classify_chrom:
         "envs/cpg.yaml"
     shell:
         r"""
-        bcftools norm -m- -f {input.ref} {input.vcf} \
-        | bcftools view -f PASS -v snps -i 'REF="C" || REF="G"' \
-        | bcftools +split-vep -a vep -d -f '{SPLIT_VEP_FMT}' \
+        bcftools +split-vep {input.vcf} -a {CSQ_TAG} -d -f '{SPLIT_VEP_FMT}' \
         | python3 {input.script} \
             --fasta {input.ref} \
             --variant-out {output.variant} \

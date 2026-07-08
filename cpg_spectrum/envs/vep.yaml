@@ -1,0 +1,15 @@
+# Conda fallback for the VEP annotation rule (RGC source only).
+#
+# On the target cluster VEP is provided as a module (`ensembl/1.14`); prefer
+# that by running snakemake with --use-envmodules. This env exists so the
+# pipeline is still runnable with --use-conda elsewhere. `htslib` supplies the
+# bgzip used to compress VEP output.
+#
+# Pin `ensembl-vep` to the same major release as the offline cache you download
+# (see `vep.release` in config.yaml).
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - ensembl-vep >=112,<113
+  - htslib >=1.19

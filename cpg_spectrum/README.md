@@ -1,41 +1,73 @@
-# CpG mutation spectrum (gnomAD v4.1)
+# CpG mutation spectrum (gnomAD v4.1 & RGC Million Exomes)
 
 Counts mutated C and G SNVs, split by CpG context, substitution type, gene, and
 (for coding CpGs) whether the CpG sits within a single codon or is split across
 two codons.
 
+One pipeline handles two data sources, selected by `source:` in `config.yaml`
+(or `--config source=…`):
+
+- **`gnomad`** — v4.1 release sites VCFs, already VEP-annotated and chr-prefixed.
+- **`rgc`** — RGC Million Exomes frequency VCFs, which carry **no functional
+  annotation** and use Ensembl-style contigs (`1..22,X,Y`). For this source the
+  pipeline renames contigs to `chr*` and runs Ensembl VEP itself.
+
+Everything downstream of the `bcftools +split-vep` TSV (`cpg_spectrum.py`,
+`refine_exon_boundary.py`, `summarize.R`, the exon map) is source-agnostic.
+
 ## Inputs
 
-- gnomAD v4.1 release **sites** VCFs (`gnomad.*.v4.1.sites.chr*.vcf.bgz`), which
-  carry the `vep` (VEP CSQ) INFO field used for gene/codon annotation.
-- GRCh38 reference FASTA, **uncompressed** (the `.fai` reader seeks by byte
-  offset, so bgzipped won't work; the Snakefile rejects it). Contig names must be
-  `chr`-prefixed to match the VCF. The Snakemake `faidx` rule builds the `.fai`
-  index automatically (needs `samtools`); for a by-hand run do `samtools faidx GRCh38.fa` first.
+- **Source VCFs** — path template set per source in `config.yaml`
+  (`sources.<source>.vcf_template`, with a `{chrom}` = `chr1..chrY` wildcard):
+  - `gnomad`: v4.1 release **sites** VCFs, which carry the `vep` (VEP CSQ) INFO
+    field used for gene/codon annotation.
+  - `rgc`: `rgc_me_variant_frequencies_{chrom}_20231004.vcf.gz`. Whole-cohort
+    allele count is `INFO/ALL_AC` (per-population `*_AC` are probabilistic
+    floats); contigs inside are `1..22,X,Y`.
+- **GRCh38 reference FASTA**, **uncompressed** and **chr-prefixed** (the `.fai`
+  reader seeks by byte offset, so bgzipped won't work; the Snakefile rejects it).
+  Shared by both sources — for `rgc` the contig rename (`1→chr1`, via
+  `data/ens2ucsc_chrs.txt`) makes RGC records match this same reference and the
+  exon map. The `faidx` rule builds the index (needs `samtools`); by hand,
+  `samtools faidx GRCh38.fa` first.
+- **`rgc` only:** Ensembl VEP + a GRCh38 offline cache (see the VEP section below).
 
-Confirm the CSQ subfield names in your files once:
+Confirm the CSQ subfield names for a `gnomad` source once (the `rgc` source
+generates them itself via VEP `--fields`, so no check needed):
 
 ```bash
 bcftools +split-vep -l gnomad.exomes.v4.1.sites.chr1.vcf.bgz
 ```
 
 You should see `Gene`, `SYMBOL`, `Feature`, `BIOTYPE`, `Consequence`,
-`CANONICAL`, `MANE_SELECT`, `Codons`. If any differ, adjust the `-f` string below.
+`CANONICAL`, `MANE_SELECT`, `Codons`. If any differ, adjust `SPLIT_VEP_FMT` /
+`sources.gnomad.csq_tag` in the Snakefile/config.
 
 ## Run
 
 ### Option A: Snakemake (recommended)
 
-Edit `REF`, `VCF_TEMPLATE`, and `EXON_MAP` at the top of the `Snakefile`, then:
+Set `source`, `ref`, `exon_map`, and the per-source `vcf_template` in
+`config.yaml`, then:
 
 ```bash
-snakemake -j 8 all
+# gnomAD (already annotated — no VEP needed)
+snakemake -j 8 --config source=gnomad all
+
+# RGC Million Exomes (runs VEP; --use-envmodules picks up the cluster's `ensembl` module)
+snakemake -j 8 --use-envmodules --config source=rgc all
 ```
 
 This runs each chromosome in parallel, merges, and applies the exon-boundary
-refinement, producing `variant_level.tsv` and `gene_level.refined.tsv`.
+refinement, producing `variant_level.tsv` and `gene_level.refined.tsv`. For
+`rgc` it first renames contigs, normalizes/filters, and annotates with VEP
+(`prep_chrom` → `vep_chrom` → `classify_chrom`); for `gnomad` the VEP rule is
+absent and `classify_chrom` reads the already-annotated prepped VCF.
 
-### Option B: by hand
+### Option B: by hand (gnomAD)
+
+The recipe below is the `gnomad` case (already annotated). For `rgc` you must
+first rename contigs and run VEP (see the VEP section); prefer Snakemake there.
 
 ```bash
 REF=GRCh38.fa
@@ -61,6 +93,42 @@ python3 scripts/refine_exon_boundary.py \
   re-groups them per variant and picks one anchor transcript per gene
   (MANE Select, else Ensembl canonical).
 - `refine_exon_boundary.py` re-checks coding CpGs against the exon map (below).
+
+## VEP annotation & cache (rgc source)
+
+RGC-ME frequency VCFs carry no gene/consequence annotation, so the `rgc` source
+runs Ensembl VEP itself (rule `vep_chrom`) to reproduce gnomAD's CSQ subfields
+(`Gene, SYMBOL, Feature, BIOTYPE, Consequence, CANONICAL, MANE_SELECT, Codons`).
+Because those subfield names and the `Codons` field match gnomAD's, the
+downstream scripts are unchanged.
+
+VEP is expected on the cluster as a module; run Snakemake with
+`--use-envmodules` (the module name is `vep.module` in `config.yaml`). A conda
+fallback (`envs/vep.yaml`) is used with `--use-conda` instead.
+
+**One-time cache download.** VEP needs a GRCh38 offline cache; `vep.cache_dir`
+must contain it and `vep.release` must match its version. On a login node (which
+usually has network), with the module loaded:
+
+```bash
+module load ensembl                      # provides `vep` and `vep_install`
+vep --help | grep -i 'versions\|ensembl-vep'   # note the release, set vep.release to it
+mkdir -p /scratch/jacks.local/frederick.boehm/exomes/data/vep_cache
+
+# cache only (-a c); we pass our own --fasta, so skip the cache FASTA
+vep_install -a c -s homo_sapiens -y GRCh38 \
+  --CACHEDIR /scratch/jacks.local/frederick.boehm/exomes/data/vep_cache \
+  --CACHE_VERSION 112 --NO_HTSLIB
+```
+
+This creates `…/vep_cache/homo_sapiens/112_GRCh38/`, which includes the
+`chr_synonyms.txt` the rule passes via `--synonyms` so the Ensembl cache resolves
+the `chr`-prefixed contigs. Match `--CACHE_VERSION` to the VEP binary's release
+and to `vep.release`; align both with MANE v1.5 / GENCODE v49 (Ensembl ~112) so
+transcript IDs line up with `mane_exons_grch38.tsv`.
+
+To restrict to on-target exome calls, set `sources.rgc.include_extra:
+"ON_TARGET=1"` (confirm the `INFO/ON_TARGET` Type in the VCF header first).
 
 ## Outputs
 

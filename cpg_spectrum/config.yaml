@@ -1,0 +1,54 @@
+# CpG mutation spectrum — pipeline configuration.
+#
+# One pipeline, two data sources. Pick with `source:` below, or override on the
+# command line without editing this file, e.g.:
+#     snakemake -j8 --use-envmodules --config source=gnomad all
+#
+# The whole downstream (cpg_spectrum.py, refine_exon_boundary.py, summarize.R,
+# and the exon map) is source-agnostic; only the front-end (contig naming,
+# allele-count field, and whether we must run VEP ourselves) differs.
+
+source: rgc
+
+# Shared reference: UCSC GRCh38, chr-prefixed, UNCOMPRESSED + samtools-faidx'd.
+# (cpg_spectrum.py seeks by byte offset, so a bgzipped FASTA is rejected.)
+ref: /scratch/jacks.local/frederick.boehm/exomes/data/Homo_sapiens_assembly38.fasta
+
+# Per-exon CDS map used by the exon-boundary refinement (transcript-keyed, so
+# its chrom naming is irrelevant).
+exon_map: ../uniprot_exon_map/mane_exons_grch38.tsv
+
+sources:
+
+  # gnomAD v4.1 release sites VCFs — already VEP-annotated (`vep` INFO field),
+  # already chr-prefixed. Reproduces the original pipeline.
+  gnomad:
+    vcf_template: /scratch/jacks.local/frederick.boehm/exomes/data/gnomad/exomes/v4.1/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz
+    csq_tag: vep        # +split-vep -a <tag>
+    ac_field: AC        # scalar allele count after `norm -m-`
+    rename_chrs: false  # contigs already chr1..chrY
+    annotate: false     # VEP annotation already present
+    include_extra: ""   # extra bcftools -i expression (ANDed in), if any
+
+  # RGC Million Exomes variant-frequency VCFs — NO functional annotation, and
+  # contigs are Ensembl-style (1..22,X,Y) despite chr in the filenames.
+  rgc:
+    vcf_template: /scratch/jacks.local/frederick.boehm/exomes/data/rgc/20231004/rgc_me_variant_frequencies_{chrom}_20231004.vcf.gz
+    csq_tag: CSQ        # the tag VEP writes
+    ac_field: ALL_AC    # whole-cohort integer allele count (per-pop AC are floats)
+    rename_chrs: true   # 1->chr1 ... via data/ens2ucsc_chrs.txt, to match REF + exon map
+    annotate: true      # run Ensembl VEP ourselves (adds CSQ)
+    # Exome capture: set to 'ON_TARGET=1' to restrict to on-target calls.
+    # Left empty to mirror gnomAD (which has no equivalent flag). Confirm the
+    # INFO/ON_TARGET Type in the VCF header before enabling.
+    include_extra: ""
+
+# Ensembl VEP settings (only used when the active source has annotate: true).
+# The cluster provides VEP via `module load ensembl`; run snakemake with
+# --use-envmodules to pick it up. A GRCh38 offline cache must be downloaded once
+# (see README) into cache_dir; `release` must match a downloaded cache version.
+vep:
+  module: ensembl/1.14
+  cache_dir: /scratch/jacks.local/frederick.boehm/exomes/data/vep_cache
+  release: 112          # Ensembl release; align with MANE v1.5 / GENCODE v49
+  fork: 4               # VEP worker processes per chromosome job
