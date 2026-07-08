@@ -50,5 +50,5 @@ sources:
 vep:
   module: ensembl/1.14
   cache_dir: /scratch/jacks.local/frederick.boehm/exomes/data/vep_cache
-  release: 112          # Ensembl release; align with MANE v1.5 / GENCODE v49
+  release: 114          # Ensembl release; must match the `ensembl` module's ensembl-vep (114.0)
   fork: 4               # VEP worker processes per chromosome job
