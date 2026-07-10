@@ -17,7 +17,13 @@ jobs: 24                       # max SLURM jobs in flight (one per chromosome)
 # Per-rule conda envs (envs/cpg.yaml). Pre-build them on the login node with
 # `--conda-create-envs-only` BEFORE submitting — compute nodes usually have no
 # internet, so the env must already exist when a job activates it.
+#
+# env-modules is listed so the rgc VEP rule (vep_chrom) can use the cluster's
+# `ensembl/1.14` module (config.yaml vep.module) instead of the conda fallback.
+# When a rule defines both `conda:` and `envmodules:`, the first method here that
+# the rule supports wins, so env-modules takes precedence for vep_chrom.
 software-deployment-method:
+  - env-modules
   - conda
 conda-frontend: conda         # mamba isn't installed here; use plain conda
 
@@ -35,6 +41,10 @@ default-resources:
 # classify_chrom is the heavy rule (bcftools norm | view | split-vep | python).
 # chr1 is the slowest because split-vep -d expands one row per transcript.
 set-resources:
+  vep_chrom:                   # rgc only; Ensembl VEP with --fork 4 (config vep.fork)
+    cpus_per_task: 4           # must match config vep.fork so all workers get a core
+    mem_mb: 8000
+    runtime: 240               # 4 h; whole-chromosome offline VEP. Tune to real timings.
   classify_chrom:
     mem_mb: 8000
     runtime: 360               # 6 h ceiling; tune down once you see real timings
