@@ -1,16 +1,18 @@
 # CpG mutation spectrum from population exome sites VCFs.
 #
 # One pipeline, two sources (see config.yaml):
-#   - gnomad : v4.1 release sites VCFs, already VEP-annotated + chr-prefixed.
-#   - rgc    : RGC Million Exomes frequency VCFs, unannotated + Ensembl-named
-#              contigs (1..Y), so we rename to chr* and run Ensembl VEP here.
+#   - gnomadv4-1 : v4.1 release sites VCFs, already VEP-annotated + chr-prefixed.
+#   - rgc        : RGC Million Exomes frequency VCFs, unannotated + Ensembl-named
+#                  contigs (1..Y), so we rename to chr* and run Ensembl VEP here.
 #
 # Everything downstream of the +split-vep TSV (cpg_spectrum.py,
 # refine_exon_boundary.py, summarize.R, the exon map) is source-agnostic.
 #
-# Run (gnomad needs no VEP; rgc does):
-#   snakemake -j8 --config source=gnomad all
-#   snakemake -j8 --use-envmodules --config source=rgc all
+# Run (gnomadv4-1 needs no VEP; rgc does). Put the target BEFORE --config: it
+# greedily consumes every following token as a key=value pair, so a trailing
+# `all` errors out.
+#   snakemake -j8 all --config source=gnomadv4-1
+#   snakemake -j8 --use-envmodules all --config source=rgc
 #
 # Requirements: bcftools >=1.19 with +split-vep; a samtools-faidx'd, UNCOMPRESSED,
 # chr-prefixed reference; for rgc, Ensembl VEP + a GRCh38 offline cache (README).
@@ -30,6 +32,10 @@ VCF_TEMPLATE = S["vcf_template"]
 AC_FIELD = S["ac_field"]
 CSQ_TAG = S["csq_tag"]
 CHRMAP = "data/ens2ucsc_chrs.txt"
+
+# Per-source output tree, so rgc and gnomadv4-1 results never overwrite each
+# other. Inputs (scripts/, data/, the exon map, the VCFs) are unaffected.
+OUT = f"results/{SOURCE}"
 
 CHROMS = [f"chr{c}" for c in list(range(1, 23)) + ["X", "Y"]]
 
@@ -58,9 +64,9 @@ if REF.endswith((".gz", ".bgz", ".bz2")):
 
 rule all:
     input:
-        "variant_level.tsv",
-        "gene_level.refined.tsv",
-        "summary/spectrum.png",
+        f"{OUT}/variant_level.tsv",
+        f"{OUT}/gene_level.refined.tsv",
+        f"{OUT}/summary/spectrum.png",
 
 
 # Build the .fai index the plain-Python FASTA reader needs (no-op if current).
@@ -78,7 +84,7 @@ rule faidx:
 # Normalize to the analysis-ready record set: (optionally) rename contigs to
 # chr*, split multiallelics, then keep PASS biallelic C/G SNVs (+ any source
 # extra filter). Restricting here keeps the downstream VEP input minimal. For
-# gnomad this preserves the existing `vep` INFO field; for rgc the output is
+# gnomadv4-1 this preserves the existing `vep` INFO field; for rgc the output is
 # unannotated and feeds the VEP rule.
 rule prep_chrom:
     input:
@@ -87,7 +93,7 @@ rule prep_chrom:
         fai=REF + ".fai",
         chrmap=(CHRMAP if S["rename_chrs"] else []),
     output:
-        temp("prepped/{chrom}.vcf.gz"),
+        temp(f"{OUT}/prepped/{{chrom}}.vcf.gz"),
     params:
         rename=(f"bcftools annotate --rename-chrs {CHRMAP} | " if S["rename_chrs"] else ""),
     conda:
@@ -108,10 +114,10 @@ if S["annotate"]:
 
     rule vep_chrom:
         input:
-            vcf="prepped/{chrom}.vcf.gz",
+            vcf=f"{OUT}/prepped/{{chrom}}.vcf.gz",
             ref=REF,
         output:
-            temp("annotated/{chrom}.vcf"),
+            temp(f"{OUT}/annotated/{{chrom}}.vcf"),
         threads: config["vep"]["fork"]
         params:
             cache=config["vep"]["cache_dir"],
@@ -140,8 +146,8 @@ if S["annotate"]:
 def classify_input(wildcards):
     """Annotated VCF if we ran VEP, else the prepped VCF (already carries CSQ)."""
     if S["annotate"]:
-        return f"annotated/{wildcards.chrom}.vcf"
-    return f"prepped/{wildcards.chrom}.vcf.gz"
+        return f"{OUT}/annotated/{wildcards.chrom}.vcf"
+    return f"{OUT}/prepped/{wildcards.chrom}.vcf.gz"
 
 
 # +split-vep expands per-transcript consequences; cpg_spectrum.py re-groups per
@@ -153,8 +159,8 @@ rule classify_chrom:
         fai=REF + ".fai",
         script="scripts/cpg_spectrum.py",
     output:
-        variant=temp("variant_level/{chrom}.tsv"),
-        gene=temp("gene_level/{chrom}.tsv"),
+        variant=temp(f"{OUT}/variant_level/{{chrom}}.tsv"),
+        gene=temp(f"{OUT}/gene_level/{{chrom}}.tsv"),
     conda:
         "envs/cpg.yaml"
     shell:
@@ -174,18 +180,18 @@ def _merge(inputs, output):
 
 rule merge_variant:
     input:
-        expand("variant_level/{chrom}.tsv", chrom=CHROMS),
+        expand(f"{OUT}/variant_level/{{chrom}}.tsv", chrom=CHROMS),
     output:
-        "variant_level.tsv",
+        f"{OUT}/variant_level.tsv",
     run:
         _merge(input, output[0])
 
 
 rule merge_gene:
     input:
-        expand("gene_level/{chrom}.tsv", chrom=CHROMS),
+        expand(f"{OUT}/gene_level/{{chrom}}.tsv", chrom=CHROMS),
     output:
-        "gene_level.tsv",
+        f"{OUT}/gene_level.tsv",
     run:
         _merge(input, output[0])
 
@@ -194,11 +200,11 @@ rule merge_gene:
 # exon/intron junction) from split/single_codon to exon_boundary.
 rule refine_exon_boundary:
     input:
-        gene="gene_level.tsv",
+        gene=f"{OUT}/gene_level.tsv",
         exon_map=EXON_MAP,
         script="scripts/refine_exon_boundary.py",
     output:
-        "gene_level.refined.tsv",
+        f"{OUT}/gene_level.refined.tsv",
     conda:
         "envs/cpg.yaml"
     shell:
@@ -211,14 +217,14 @@ rule refine_exon_boundary:
 # (Snakemake re-runs this rule automatically when the script changes).
 rule summarize:
     input:
-        variant="variant_level.tsv",
-        gene="gene_level.refined.tsv",
+        variant=f"{OUT}/variant_level.tsv",
+        gene=f"{OUT}/gene_level.refined.tsv",
     output:
-        spectrum="summary/spectrum_by_context.tsv",
-        singletons="summary/spectrum_singletons.tsv",
-        consequence="summary/spectrum_by_consequence.tsv",
-        codon="summary/codon_class.tsv",
-        plot="summary/spectrum.png",
+        spectrum=f"{OUT}/summary/spectrum_by_context.tsv",
+        singletons=f"{OUT}/summary/spectrum_singletons.tsv",
+        consequence=f"{OUT}/summary/spectrum_by_consequence.tsv",
+        codon=f"{OUT}/summary/codon_class.tsv",
+        plot=f"{OUT}/summary/spectrum.png",
     conda:
         "envs/summarize.yaml"
     script:

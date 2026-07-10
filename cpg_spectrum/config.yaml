@@ -1,8 +1,9 @@
 # CpG mutation spectrum — pipeline configuration.
 #
 # One pipeline, two data sources. Pick with `source:` below, or override on the
-# command line without editing this file, e.g.:
-#     snakemake -j8 --use-envmodules --config source=gnomad all
+# command line without editing this file. Put the target before --config (which
+# greedily eats all trailing tokens as key=value pairs), e.g.:
+#     snakemake -j8 --use-envmodules all --config source=gnomadv4-1
 #
 # The whole downstream (cpg_spectrum.py, refine_exon_boundary.py, summarize.R,
 # and the exon map) is source-agnostic; only the front-end (contig naming,
@@ -22,7 +23,7 @@ sources:
 
   # gnomAD v4.1 release sites VCFs — already VEP-annotated (`vep` INFO field),
   # already chr-prefixed. Reproduces the original pipeline.
-  gnomad:
+  gnomadv4-1:
     vcf_template: /scratch/jacks.local/frederick.boehm/exomes/data/gnomad/exomes/v4.1/gnomad.exomes.v4.1.sites.{chrom}.vcf.bgz
     csq_tag: vep        # +split-vep -a <tag>
     ac_field: AC        # scalar allele count after `norm -m-`

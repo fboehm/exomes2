@@ -7,7 +7,7 @@ two codons.
 One pipeline handles two data sources, selected by `source:` in `config.yaml`
 (or `--config source=…`):
 
-- **`gnomad`** — v4.1 release sites VCFs, already VEP-annotated and chr-prefixed.
+- **`gnomadv4-1`** — v4.1 release sites VCFs, already VEP-annotated and chr-prefixed.
 - **`rgc`** — RGC Million Exomes frequency VCFs, which carry **no functional
   annotation** and use Ensembl-style contigs (`1..22,X,Y`). For this source the
   pipeline renames contigs to `chr*` and runs Ensembl VEP itself.
@@ -19,7 +19,7 @@ Everything downstream of the `bcftools +split-vep` TSV (`cpg_spectrum.py`,
 
 - **Source VCFs** — path template set per source in `config.yaml`
   (`sources.<source>.vcf_template`, with a `{chrom}` = `chr1..chrY` wildcard):
-  - `gnomad`: v4.1 release **sites** VCFs, which carry the `vep` (VEP CSQ) INFO
+  - `gnomadv4-1`: v4.1 release **sites** VCFs, which carry the `vep` (VEP CSQ) INFO
     field used for gene/codon annotation.
   - `rgc`: `rgc_me_variant_frequencies_{chrom}_20231004.vcf.gz`. Whole-cohort
     allele count is `INFO/ALL_AC` (per-population `*_AC` are probabilistic
@@ -32,7 +32,7 @@ Everything downstream of the `bcftools +split-vep` TSV (`cpg_spectrum.py`,
   `samtools faidx GRCh38.fa` first.
 - **`rgc` only:** Ensembl VEP + a GRCh38 offline cache (see the VEP section below).
 
-Confirm the CSQ subfield names for a `gnomad` source once (the `rgc` source
+Confirm the CSQ subfield names for a `gnomadv4-1` source once (the `rgc` source
 generates them itself via VEP `--fields`, so no check needed):
 
 ```bash
@@ -41,7 +41,7 @@ bcftools +split-vep -l gnomad.exomes.v4.1.sites.chr1.vcf.bgz
 
 You should see `Gene`, `SYMBOL`, `Feature`, `BIOTYPE`, `Consequence`,
 `CANONICAL`, `MANE_SELECT`, `Codons`. If any differ, adjust `SPLIT_VEP_FMT` /
-`sources.gnomad.csq_tag` in the Snakefile/config.
+`sources.gnomadv4-1.csq_tag` in the Snakefile/config.
 
 ## Run
 
@@ -51,22 +51,28 @@ Set `source`, `ref`, `exon_map`, and the per-source `vcf_template` in
 `config.yaml`, then:
 
 ```bash
-# gnomAD (already annotated — no VEP needed)
-snakemake -j 8 --config source=gnomad all
+# gnomAD (already annotated — no VEP needed).
+# NOTE: the target (`all`) must come BEFORE --config. --config consumes every
+# following token as key=value, so `--config source=… all` makes Snakemake choke
+# on `all`.
+snakemake -j 8 all --config source=gnomadv4-1
 
 # RGC Million Exomes (runs VEP; --use-envmodules picks up the cluster's `ensembl` module)
-snakemake -j 8 --use-envmodules --config source=rgc all
+snakemake -j 8 --use-envmodules all --config source=rgc
 ```
 
 This runs each chromosome in parallel, merges, and applies the exon-boundary
-refinement, producing `variant_level.tsv` and `gene_level.refined.tsv`. For
+refinement, producing `variant_level.tsv` and `gene_level.refined.tsv`. Outputs
+are written under a per-source tree, `results/<source>/` (e.g.
+`results/rgc/variant_level.tsv`, `results/gnomadv4-1/variant_level.tsv`), so the
+two sources never overwrite each other and can be built side by side. For
 `rgc` it first renames contigs, normalizes/filters, and annotates with VEP
-(`prep_chrom` → `vep_chrom` → `classify_chrom`); for `gnomad` the VEP rule is
+(`prep_chrom` → `vep_chrom` → `classify_chrom`); for `gnomadv4-1` the VEP rule is
 absent and `classify_chrom` reads the already-annotated prepped VCF.
 
 ### Option B: by hand (gnomAD)
 
-The recipe below is the `gnomad` case (already annotated). For `rgc` you must
+The recipe below is the `gnomadv4-1` case (already annotated). For `rgc` you must
 first rename contigs and run VEP (see the VEP section); prefer Snakemake there.
 
 ```bash
@@ -131,6 +137,10 @@ To restrict to on-target exome calls, set `sources.rgc.include_extra:
 "ON_TARGET=1"` (confirm the `INFO/ON_TARGET` Type in the VCF header first).
 
 ## Outputs
+
+All output paths below are relative to the per-source tree `results/<source>/`
+(e.g. `results/rgc/variant_level.tsv`). The `summary/` and `awk` examples in the
+following sections show bare names for brevity — prefix them the same way.
 
 `variant_level.tsv` (one row per variant allele, includes intergenic):
 
