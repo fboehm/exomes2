@@ -1,0 +1,7 @@
+codon_class	partner_coding	n
+noncoding	NA	2626420
+single_codon	yes	1256776
+split_codon	yes	872952
+single_codon	unknown	219954
+split_codon	unknown	147828
+exon_boundary	no	4736
